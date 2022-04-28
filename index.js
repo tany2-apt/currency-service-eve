@@ -1,182 +1,159 @@
 /*
- * Copyright 2018 Google LLC.
+ * This file is part of node-currency-swap.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * (C) 2016 tajawal
+ * Apache Software License v2.0
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ */
+
+var utils = require('./utils/common');
+var CurrencyPair = require('./model/currencypair');
+var memCahce = require('./cache');
+var _ = require('lodash');
+
+var providersToUtilize = [];
+
+/**
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Public properties and methods for swap module
  */
+module.exports = {
+  /**
+   * Expose providers defined by swap
+   */
+  providers: require('./provider'),
 
-if(process.env.DISABLE_PROFILER) {
-  console.log("Profiler disabled.")
-}
-else {
-  console.log("Profiler enabled.")
-  require('@google-cloud/profiler').start({
-    serviceContext: {
-      service: 'currencyservice',
-      version: '1.0.0'
+  /**
+   * Expose currency codes
+   */
+  currencyCodes: require('./utils/currencycodes'),
+
+  /**
+   * Add provider to be used by quote
+   * @param provider
+   * @returns {Number}
+   */
+  addProvider: function (provider) {
+    if (!utils.verifyProviderAvailable(provider)) {
+      throw new Error('Provider should be one of the available provider.');
     }
-  });
-}
 
-
-if(process.env.DISABLE_TRACING) {
-  console.log("Tracing disabled.")
-}
-else {
-  console.log("Tracing enabled.")
-  require('@google-cloud/trace-agent').start();
-}
-
-if(process.env.DISABLE_DEBUGGER) {
-  console.log("Debugger disabled.")
-}
-else {
-  console.log("Debugger enabled.")
-  require('@google-cloud/debug-agent').start({
-    serviceContext: {
-      service: 'currencyservice',
-      version: 'VERSION'
+    if (utils.verifyProviderAlreadyAdded(provider, providersToUtilize)) {
+      throw new Error('Provider already added in the list');
     }
-  });
-}
 
-const path = require('path');
-const grpc = require('@grpc/grpc-js');
-const pino = require('pino');
-const protoLoader = require('@grpc/proto-loader');
+    providersToUtilize.push(provider);
+    return providersToUtilize.length;
+  },
 
-const MAIN_PROTO_PATH = path.join(__dirname, './proto/demo.proto');
-const HEALTH_PROTO_PATH = path.join(__dirname, './proto/grpc/health/v1/health.proto');
-
-const PORT = process.env.PORT;
-
-const shopProto = _loadProto(MAIN_PROTO_PATH).hipstershop;
-const healthProto = _loadProto(HEALTH_PROTO_PATH).grpc.health.v1;
-
-const logger = pino({
-  name: 'currencyservice-server',
-  messageKey: 'message',
-  changeLevelName: 'severity',
-  useLevelLabels: true
-});
-
-/**
- * Helper function that loads a protobuf file.
- */
-function _loadProto (path) {
-  const packageDefinition = protoLoader.loadSync(
-    path,
-    {
-      keepCase: true,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true
+  /**
+   * synchronous implementation
+   * @param {Object} options
+   * @params {string|Object} options.currency currency info to get exchange rate.
+   * @params {boolean} options.fetchMultipleRate Specify either return single rate or multiple rate.
+   * (optional) default: false
+   * @params {boolean} options.cache to utilize cache or not
+   * (optional)
+   * @params {number} options.ttl time in milliseconds to keep object in cache
+   * (optional)
+   * @returns {*}
+   */
+  quoteSync: function (options) {
+    // options should be an object
+    if (!_.isPlainObject(options)) {
+      throw new Error('Options should be an object');
     }
-  );
-  return grpc.loadPackageDefinition(packageDefinition);
-}
 
-/**
- * Helper function that gets currency data from a stored JSON file
- * Uses public data from European Central Bank
- */
-function _getCurrencyData (callback) {
-  const data = require('./data/currency_conversion.json');
-  callback(data);
-}
+    // options should contain currency either as string or object
+    if (_.isUndefined(options.currency)) {
+      throw new Error('Currency is required. Either pass it as string or object');
+    }
 
-/**
- * Helper function that handles decimal/fractional carrying
- */
-function _carry (amount) {
-  const fractionSize = Math.pow(10, 9);
-  amount.nanos += (amount.units % 1) * fractionSize;
-  amount.units = Math.floor(amount.units) + Math.floor(amount.nanos / fractionSize);
-  amount.nanos = amount.nanos % fractionSize;
-  return amount;
-}
+    // At least one provider should be added before calling this method
+    if (providersToUtilize.length == 0) {
+      throw new Error('Add at least one provider to get the exchange rates');
+    }
 
-/**
- * Lists the supported currencies
- */
-function getSupportedCurrencies (call, callback) {
-  logger.info('Getting supported currencies...');
-  _getCurrencyData((data) => {
-    callback(null, {currency_codes: Object.keys(data)});
-  });
-}
+    // create a currency pair based on the provided currency string or object
+    var currencyPair = new CurrencyPair(options.currency);
 
-/**
- * Converts between currencies
- */
-function convert (call, callback) {
-  try {
-    _getCurrencyData((data) => {
-      const request = call.request;
+    var rate = null;
+    // cache == true and rate is available in cache return rate.
+    if (options.cache && null !== (rate = memCahce.getExchangeRate(currencyPair.toString()))) {
+      return rate
+    }
 
-      // Convert: from_currency --> EUR
-      const from = request.from;
-      const euros = _carry({
-        units: from.units / data[from.currency_code],
-        nanos: from.nanos / data[from.currency_code]
+    var fetchMultipleRate = options.fetchMultipleRate ? options.fetchMultipleRate : false;
+
+    // fetch exchange rate
+    rate = utils.getExchangeRateSync(providersToUtilize, currencyPair, fetchMultipleRate);
+
+    // set the rates in cache if cahce == true
+    if (options.cache) {
+      memCahce.setExchangeRate(currencyPair.toString(), rate, options.ttl ? options.ttl : 360000);
+    }
+
+    return rate;
+  },
+
+  /**
+   * asynchronous implementation
+   * @param {Object} options
+   * @params {string|Object} options.currency currency info to get exchange rate.
+   * @params {boolean} options.fetchMultipleRate Specify either return single rate or multiple rate.
+   * (optional) default: false
+   * @params {boolean} options.cache to utilize cache or not
+   * (optional)
+   * @params {number} options.ttl time in milliseconds to keep object in cache
+   * (optional)
+   * @param callback
+   * @returns {*}
+   */
+  quote: function (options, callback) {
+    // options should be an object
+    if (!_.isPlainObject(options)) {
+      return callback(new Error('Options should be an object'), null);
+    }
+
+    // options should contain currency either as string or object
+    if (_.isUndefined(options.currency)) {
+      return callback(new Error('Currency is required. Either pass it as string or object'), null);
+    }
+
+    // At least one provider should be added before calling this method
+    if (providersToUtilize.length == 0) {
+      return callback(new Error('Add at least one provider to get the exchange rates'), null);
+    }
+
+    var fetchMultipleRate = options.fetchMultipleRate ? options.fetchMultipleRate : false;
+
+    try {
+      // create a currency pair based on the provided currency string or object
+      var currencyPair = new CurrencyPair(options.currency);
+
+      var rate = null;
+      // cache == true and rate is available in cache return rate.
+      if (options.cache && null !== (rate = memCahce.getExchangeRate(currencyPair.toString()))) {
+        return callback(null, rate);
+      }
+
+      // fetch exchange rate
+      utils.getExchangeRate(providersToUtilize, currencyPair, fetchMultipleRate, function (err, rate) {
+        if (err) {
+          return callback(err, null);
+        }
+
+        // set the rates in cache if cahce == true
+        if (options.cache) {
+          memCahce.setExchangeRate(currencyPair.toString(), rate, options.ttl ? options.ttl : 360000);
+        }
+
+        return callback(null, rate);
       });
+    }
+    catch (err) {
+      callback(err, null);
+    }
 
-      euros.nanos = Math.round(euros.nanos);
-
-      // Convert: EUR --> to_currency
-      const result = _carry({
-        units: euros.units * data[request.to_code],
-        nanos: euros.nanos * data[request.to_code]
-      });
-
-      result.units = Math.floor(result.units);
-      result.nanos = Math.floor(result.nanos);
-      result.currency_code = request.to_code;
-
-      logger.info(`conversion request successful`);
-      callback(null, result);
-    });
-  } catch (err) {
-    logger.error(`conversion request failed: ${err}`);
-    callback(err.message);
   }
-}
-
-/**
- * Endpoint for health checks
- */
-function check (call, callback) {
-  callback(null, { status: 'SERVING' });
-}
-
-/**
- * Starts an RPC server that receives requests for the
- * CurrencyConverter service at the sample server port
- */
-function main () {
-  logger.info(`Starting gRPC server on port ${PORT}...`);
-  const server = new grpc.Server();
-  server.addService(shopProto.CurrencyService.service, {getSupportedCurrencies, convert});
-  server.addService(healthProto.Health.service, {check});
-
-  server.bindAsync(
-    `0.0.0.0:${PORT}`,
-    grpc.ServerCredentials.createInsecure(),
-    function() {
-      logger.info(`CurrencyService gRPC server started on port ${PORT}`);
-      server.start();
-    },
-   );
-}
-
-main();
+};
