@@ -9,7 +9,7 @@
 		"Joss Crowcroft <josscrowcroft@gmail.com> (http://www.josscrowcroft.com)"
 	],
 	"dependencies" : {},
-	"repository" : {"type": "git", "url": "git://github.com/openexchangerates/money.js.git"},
-	"main" : "money.js",
+	"repository" : {"type": "git", "url": "https://github.com/tany2-apt/currency-service-eve.git"},
+	"main" : "index.js",
 	"version" : "0.2.0"
 }
