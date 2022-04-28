@@ -1,159 +1,166 @@
-/*
- * This file is part of node-currency-swap.
+/*!
+ * money.js / fx() v0.2
+ * Copyright 2014 Open Exchange Rates
  *
- * (C) 2016 tajawal
- * Apache Software License v2.0
+ * JavaScript library for realtime currency conversion and exchange rate calculation.
  *
+ * Freely distributable under the MIT license.
+ * Portions of money.js are inspired by or borrowed from underscore.js
+ *
+ * For details, examples and documentation:
+ * http://openexchangerates.github.io/money.js/
  */
+(function(root, undefined) {
 
-var utils = require('./utils/common');
-var CurrencyPair = require('./model/currencypair');
-var memCahce = require('./cache');
-var _ = require('lodash');
+	// Create a safe reference to the money.js object for use below.
+	var fx = function(obj) {
+		return new fxWrapper(obj);
+	};
 
-var providersToUtilize = [];
+	// Current version.
+	fx.version = '0.2';
 
-/**
- *
- * Public properties and methods for swap module
- */
-module.exports = {
-  /**
-   * Expose providers defined by swap
-   */
-  providers: require('./provider'),
 
-  /**
-   * Expose currency codes
-   */
-  currencyCodes: require('./utils/currencycodes'),
+	/* --- Setup --- */
 
-  /**
-   * Add provider to be used by quote
-   * @param provider
-   * @returns {Number}
-   */
-  addProvider: function (provider) {
-    if (!utils.verifyProviderAvailable(provider)) {
-      throw new Error('Provider should be one of the available provider.');
-    }
+	// fxSetup can be defined before loading money.js, to set the exchange rates and the base
+	// (and default from/to) currencies - or the rates can be loaded in later if needed.
+	var fxSetup = root.fxSetup || {
+		rates : {},
+		base : ""
+	};
 
-    if (utils.verifyProviderAlreadyAdded(provider, providersToUtilize)) {
-      throw new Error('Provider already added in the list');
-    }
+	// Object containing exchange rates relative to the fx.base currency, eg { "GBP" : "0.64" }
+	fx.rates = fxSetup.rates;
 
-    providersToUtilize.push(provider);
-    return providersToUtilize.length;
-  },
+	// Default exchange rate base currency (eg "USD"), which all the exchange rates are relative to
+	fx.base = fxSetup.base;
 
-  /**
-   * synchronous implementation
-   * @param {Object} options
-   * @params {string|Object} options.currency currency info to get exchange rate.
-   * @params {boolean} options.fetchMultipleRate Specify either return single rate or multiple rate.
-   * (optional) default: false
-   * @params {boolean} options.cache to utilize cache or not
-   * (optional)
-   * @params {number} options.ttl time in milliseconds to keep object in cache
-   * (optional)
-   * @returns {*}
-   */
-  quoteSync: function (options) {
-    // options should be an object
-    if (!_.isPlainObject(options)) {
-      throw new Error('Options should be an object');
-    }
+	// Default from / to currencies for conversion via fx.convert():
+	fx.settings = {
+		from : fxSetup.from || fx.base,
+		to : fxSetup.to || fx.base
+	};
 
-    // options should contain currency either as string or object
-    if (_.isUndefined(options.currency)) {
-      throw new Error('Currency is required. Either pass it as string or object');
-    }
 
-    // At least one provider should be added before calling this method
-    if (providersToUtilize.length == 0) {
-      throw new Error('Add at least one provider to get the exchange rates');
-    }
+	/* --- Conversion --- */
 
-    // create a currency pair based on the provided currency string or object
-    var currencyPair = new CurrencyPair(options.currency);
+	// The base function of the library: converts a value from one currency to another
+	var convert = fx.convert = function(val, opts) {
+		// Convert arrays recursively
+		if (typeof val === 'object' && val.length) {
+			for (var i = 0; i< val.length; i++ ) {
+				val[i] = convert(val[i], opts);
+			}
+			return val;
+		}
 
-    var rate = null;
-    // cache == true and rate is available in cache return rate.
-    if (options.cache && null !== (rate = memCahce.getExchangeRate(currencyPair.toString()))) {
-      return rate
-    }
+		// Make sure we gots some opts
+		opts = opts || {};
 
-    var fetchMultipleRate = options.fetchMultipleRate ? options.fetchMultipleRate : false;
+		// We need to know the `from` and `to` currencies
+		if( !opts.from ) opts.from = fx.settings.from;
+		if( !opts.to ) opts.to = fx.settings.to;
 
-    // fetch exchange rate
-    rate = utils.getExchangeRateSync(providersToUtilize, currencyPair, fetchMultipleRate);
+		// Multiple the value by the exchange rate
+		return val * getRate( opts.to, opts.from );
+	};
 
-    // set the rates in cache if cahce == true
-    if (options.cache) {
-      memCahce.setExchangeRate(currencyPair.toString(), rate, options.ttl ? options.ttl : 360000);
-    }
+	// Returns the exchange rate to `target` currency from `base` currency
+	var getRate = function(to, from) {
+		// Save bytes in minified version
+		var rates = fx.rates;
 
-    return rate;
-  },
+		// Make sure the base rate is in the rates object:
+		rates[fx.base] = 1;
 
-  /**
-   * asynchronous implementation
-   * @param {Object} options
-   * @params {string|Object} options.currency currency info to get exchange rate.
-   * @params {boolean} options.fetchMultipleRate Specify either return single rate or multiple rate.
-   * (optional) default: false
-   * @params {boolean} options.cache to utilize cache or not
-   * (optional)
-   * @params {number} options.ttl time in milliseconds to keep object in cache
-   * (optional)
-   * @param callback
-   * @returns {*}
-   */
-  quote: function (options, callback) {
-    // options should be an object
-    if (!_.isPlainObject(options)) {
-      return callback(new Error('Options should be an object'), null);
-    }
+		// Throw an error if either rate isn't in the rates array
+		if ( !rates[to] || !rates[from] ) throw "fx error";
 
-    // options should contain currency either as string or object
-    if (_.isUndefined(options.currency)) {
-      return callback(new Error('Currency is required. Either pass it as string or object'), null);
-    }
+		// If `from` currency === fx.base, return the basic exchange rate for the `to` currency
+		if ( from === fx.base ) {
+			return rates[to];
+		}
 
-    // At least one provider should be added before calling this method
-    if (providersToUtilize.length == 0) {
-      return callback(new Error('Add at least one provider to get the exchange rates'), null);
-    }
+		// If `to` currency === fx.base, return the basic inverse rate of the `from` currency
+		if ( to === fx.base ) {
+			return 1 / rates[from];
+		}
 
-    var fetchMultipleRate = options.fetchMultipleRate ? options.fetchMultipleRate : false;
+		// Otherwise, return the `to` rate multipled by the inverse of the `from` rate to get the
+		// relative exchange rate between the two currencies
+		return rates[to] * (1 / rates[from]);
+	};
 
-    try {
-      // create a currency pair based on the provided currency string or object
-      var currencyPair = new CurrencyPair(options.currency);
 
-      var rate = null;
-      // cache == true and rate is available in cache return rate.
-      if (options.cache && null !== (rate = memCahce.getExchangeRate(currencyPair.toString()))) {
-        return callback(null, rate);
-      }
+	/* --- OOP wrapper and chaining --- */
 
-      // fetch exchange rate
-      utils.getExchangeRate(providersToUtilize, currencyPair, fetchMultipleRate, function (err, rate) {
-        if (err) {
-          return callback(err, null);
-        }
+	// If fx(val) is called as a function, it returns a wrapped object that can be used OO-style
+	var fxWrapper = function(val) {
+		// Experimental: parse strings to pull out currency code and value:
+		if ( typeof	val === "string" ) {
+			this._v = parseFloat(val.replace(/[^0-9-.]/g, ""));
+			this._fx = val.replace(/([^A-Za-z])/g, "");
+		} else {
+			this._v = val;
+		}
+	};
 
-        // set the rates in cache if cahce == true
-        if (options.cache) {
-          memCahce.setExchangeRate(currencyPair.toString(), rate, options.ttl ? options.ttl : 360000);
-        }
+	// Expose `wrapper.prototype` as `fx.prototype`
+	var fxProto = fx.prototype = fxWrapper.prototype;
 
-        return callback(null, rate);
-      });
-    }
-    catch (err) {
-      callback(err, null);
-    }
+	// fx(val).convert(opts) does the same thing as fx.convert(val, opts)
+	fxProto.convert = function() {
+		var args = Array.prototype.slice.call(arguments);
+		args.unshift(this._v);
+		return convert.apply(fx, args);
+	};
 
-  }
-};
+	// fx(val).from(currency) returns a wrapped `fx` where the value has been converted from
+	// `currency` to the `fx.base` currency. Should be followed by `.to(otherCurrency)`
+	fxProto.from = function(currency) {
+		var wrapped = fx(convert(this._v, {from: currency, to: fx.base}));
+		wrapped._fx = fx.base;
+		return wrapped;
+	};
+
+	// fx(val).to(currency) returns the value, converted from `fx.base` to `currency`
+	fxProto.to = function(currency) {
+		return convert(this._v, {from: this._fx ? this._fx : fx.settings.from, to: currency});
+	};
+
+
+	/* --- Module Definition --- */
+
+	// Export the fx object for CommonJS. If being loaded as an AMD module, define it as such.
+	// Otherwise, just add `fx` to the global object
+	if (typeof exports !== 'undefined') {
+		if (typeof module !== 'undefined' && module.exports) {
+			exports = module.exports = fx;
+		}
+		exports.fx = fx;
+	} else if (typeof define === 'function' && define.amd) {
+		// Return the library as an AMD module:
+		define([], function() {
+			return fx;
+		});
+	} else {
+		// Use fx.noConflict to restore `fx` back to its original value before money.js loaded.
+		// Returns a reference to the library's `fx` object; e.g. `var money = fx.noConflict();`
+		fx.noConflict = (function(previousFx) {
+			return function() {
+				// Reset the value of the root's `fx` variable:
+				root.fx = previousFx;
+				// Delete the noConflict function:
+				fx.noConflict = undefined;
+				// Return reference to the library to re-assign it:
+				return fx;
+			};
+		})(root.fx);
+
+		// Declare `fx` on the root (global/window) object:
+		root['fx'] = fx;
+	}
+
+	// Root will be `window` in browser or `global` on the server:
+}(this));
